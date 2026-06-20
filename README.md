@@ -7,7 +7,7 @@ A [pi agent skill](https://skills.sh/) for writing idiomatic Janet code.
 Install with the skills CLI:
 
 ```bash
-npx skills add <your-github-username>/janet-skills
+npx skills add zhaoyul/janet-skills
 ```
 
 After installation, the skill will be available to pi when working with `.janet` files.
