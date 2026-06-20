@@ -625,6 +625,141 @@ original                      # => @[1 2 3 4] (unchanged)
 (peg/match '(* "a" (capture "b")) "abc") # => @["b"]
 ```
 
+## Foreign Function Interface (FFI)
+
+Janet provides a built-in FFI module on x86-64 systems, allowing dynamic loading and calling of native libraries without writing C bindings.
+
+### When to Use FFI vs Native Bindings
+
+- **Use FFI** for quick integration, dynamic loading, or calling platform APIs (user32, libc, GUI toolkits).
+- **Prefer native C modules** when you need maximum safety, performance, or tight integration with Janet's C API.
+- **Avoid FFI for callbacks** in the general case; passing Janet functions as C callbacks requires native trampolines.
+
+### Primitive Types
+
+FFI primitive types are specified as keywords:
+
+| Keyword | C Type |
+|---------|--------|
+| `:void` | void (return only) |
+| `:bool` | bool |
+| `:ptr` | void * |
+| `:string` | const char * |
+| `:float` / `:double` | float / double |
+| `:int8` / `:uint8` | int8_t / uint8_t |
+| `:int16` / `:uint16` | int16_t / uint16_t |
+| `:int32` / `:uint32` | int32_t / uint32_t |
+| `:int64` / `:uint64` | int64_t / uint64_t |
+| `:size` / `:ssize` | size_t / ptrdiff_t |
+
+Aliases like `:s8`, `:u8`, `:char`, `:short`, `:int`, `:long`, `:byte`, `:uchar` also work. `:string` automatically converts Janet strings to `const char *` and vice versa.
+
+### Structs and Buffers
+
+Use `ffi/struct` to define C structs, and `ffi/write` / `ffi/read` to marshal data through buffers:
+
+```janet
+(def point (ffi/struct :int :int))
+(def buf (ffi/write point [10 20]))
+(ffi/read point buf)          # => @[10 20]
+```
+
+For packed structs, prefix a member with `:pack` or include `:pack-all`:
+
+```janet
+(ffi/size (ffi/struct :char :int))        # => 8
+(ffi/size (ffi/struct :char :pack :int))  # => 5
+```
+
+### Low-Level API: Manual Loading
+
+Best for runtime/dynamic binding when the library path or availability is not known at compile time.
+
+```janet
+# Load dynamic library
+(def lib (ffi/native "user32.dll"))
+
+# Look up function pointer
+(def fn-ptr (ffi/lookup lib "keybd_event"))
+
+# Detect calling convention
+(def cc
+  (let [ccs (ffi/calling-conventions)]
+    (if (and ccs (> (length ccs) 0))
+      (in ccs 0)
+      :none)))
+
+# Build signature: return-type arg-types...
+(def sig (ffi/signature cc :void :uint8 :uint8 :uint32 :ptr))
+
+# Call it
+(ffi/call fn-ptr sig vk 0 flags nil)
+```
+
+### High-Level API: ffi/context and ffi/defbind
+
+Use this for cleaner bindings when the library is known:
+
+```janet
+(ffi/context "./mylib.so")
+
+(ffi/defbind memcpy :ptr
+  [dest :ptr src :ptr n :size])
+
+(def buf1 @"aaaa")
+(def buf2 @"bbbb")
+(memcpy buf1 buf2 4)
+(print buf1)            # => bbbb
+```
+
+You can mix high- and low-level APIs in the same program.
+
+### Windows Keyboard Input Example (Runtime FFI)
+
+A practical pattern for calling Windows APIs without static linking:
+
+```janet
+# Delay-bind user32.dll
+(var keybd-event nil)
+(var keybd-event-sig nil)
+
+(defn- ensure-win! []
+  (when (nil? keybd-event)
+    (def win-lib (ffi/native "user32.dll"))
+    (set keybd-event (ffi/lookup win-lib "keybd_event"))
+    (def cc (let [ccs (ffi/calling-conventions)]
+              (if (and ccs (> (length ccs) 0)) (in ccs 0) :none)))
+    (set keybd-event-sig (ffi/signature cc :void :uint8 :uint8 :uint32 :ptr))))
+
+(def KEYEVENTF-KEYUP 0x0002)
+
+(defn- emit-key [vk keyup?]
+  (ensure-win!)
+  (ffi/call keybd-event keybd-event-sig vk 0
+            (if keyup? KEYEVENTF-KEYUP 0)
+            nil))
+
+(defn- tap-key [vk]
+  (emit-key vk false)
+  (emit-key vk true))
+```
+
+Key takeaways from this example:
+
+- Load the library lazily inside the call path.
+- Cache the function pointer and signature to avoid repeated lookups.
+- Use `:ptr` for `NULL` pointer arguments.
+- Prefer immutable `def` for constants; use `var` only for delayed binding state.
+
+### FFI Gotchas
+
+- **Pointer ownership**: Returning pointers from C does not attach GC roots. Keep references to buffers and Janet objects alive as long as native code may access them.
+- **Do not pass immutable strings as mutable buffers**: Strings, symbols, and keywords are immutable. Use buffers (`@""`) for read/write memory.
+- **No varargs**: Janet FFI does not support C varargs functions.
+- **Calling conventions**: Check `(ffi/calling-conventions)` for supported conventions. `:sysv64` is common on x86-64 Unix; Windows may differ.
+- **Structs vs Janet structs**: FFI structs are layout definitions, not Janet structs. They marshal to/from tuples.
+- **Callbacks**: Use `ffi/trampoline` only when the C API supports userdata. For general callbacks, write a small C module.
+
 ## Code Review Checklist
 
 When generating or reviewing Janet code, verify:
@@ -639,3 +774,5 @@ When generating or reviewing Janet code, verify:
 - [ ] `deep=` used for structural comparison, not `=`
 - [ ] `loop` uses correct verb syntax (`:range`, `:in`, `:keys`, etc.)
 - [ ] Mutation scope is limited and intentional
+- [ ] FFI signatures use correct calling convention and argument/return types
+- [ ] FFI pointers and buffers are kept alive across native calls
